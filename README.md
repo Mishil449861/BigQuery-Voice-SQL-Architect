@@ -12,7 +12,7 @@ An intelligent, voice-controlled interface for querying Google BigQuery using lo
 ## Tech Stack
 * **Language:** Python 3.10+
 * **Cloud:** Google Cloud Platform (BigQuery)
-* **LLM:** Meta Llama 3 8B (Quantized GGUF)
+* **LLM:** Meta Llama 3 8B (Quantized GGUF) [Downloaded Locally]
 * **Speech:** RealtimeSTT (Faster-Whisper), RealtimeTTS (System Engine)
 * **Libraries:** `google-cloud-bigquery`, `rich`, `llama-cpp-python`
 
