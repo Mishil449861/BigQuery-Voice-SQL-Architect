@@ -20,13 +20,6 @@ llm = Llama(
     verbose=False
 )
 
-output = llm.create_chat_completion(
-    messages=messages,
-    response_format={"type": "json_object"},
-    temperature=0, # Force deterministic SQL
-    max_tokens=1000 # Ensure the query isn't cut off
-)
-
 tts_engine = SystemEngine() # Uses native OS voice for 0ms latency
 tts_stream = TextToAudioStream(tts_engine)
 
