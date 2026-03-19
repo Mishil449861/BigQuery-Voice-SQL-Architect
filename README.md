@@ -1,4 +1,4 @@
-# BigQuery Voice-SQL Architect 🎙️🔍
+# BigQuery Voice-SQL Architect 
 
 An intelligent, voice-controlled interface for querying Google BigQuery using local LLMs. This project enables users to perform complex data analysis on the GitHub Public Dataset through natural speech, featuring a self-correcting SQL generation engine.
 
