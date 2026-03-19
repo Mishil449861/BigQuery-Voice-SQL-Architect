@@ -6,7 +6,7 @@ from rich.console import Console
 console = Console()
 
 # Point to your downloaded GCP service account key
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = r"C:\Users\mishi\Downloads\ba882-team4-474802-bee53a65f2ac.json"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = r"path/to/your/key.json"
 
 client = bigquery.Client()
 
