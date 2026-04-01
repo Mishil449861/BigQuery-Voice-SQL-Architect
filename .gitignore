@@ -1,0 +1,11 @@
+# Google Cloud Service Account Keys
+*.json
+*.gguf
+# Environment Variables
+.env
+.venv/
+venv/
+.cache/
+# Python Cache
+__pycache__/
+*.py[cod]

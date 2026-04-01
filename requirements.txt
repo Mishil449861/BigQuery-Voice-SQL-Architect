@@ -1,0 +1,7 @@
+google-cloud-bigquery==3.11.4
+faster-whisper>=1.0.0
+llama-cpp-python==0.2.11
+RealtimeSTT==0.1.7
+RealtimeTTS==0.5.7
+rich==13.6.0
+streamlit==1.24.0
