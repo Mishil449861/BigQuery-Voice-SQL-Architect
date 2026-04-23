@@ -3,7 +3,7 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 # 1. Your exact key path
-KEY_PATH = r"C:\Users\mishi\OneDrive\Desktop\voice_to_bq_project\ba882-team4-474802-dedd2ec99f90.json"
+KEY_PATH = r"C:/Users/mishi/OneDrive/Desktop/voice_to_bq_project/ba882-team4-474802-ef04c88ceb6f.json"
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = KEY_PATH
 
 def get_bq_client():

@@ -14,12 +14,32 @@ st.set_page_config(page_title="GitHub SQL Agent Pro", layout="wide")
 
 # Polished UI Styling
 st.markdown("""
-    <style>
-    .main { background-color: #0d1117; }
-    .stChatMessage { border: 1px solid #30363d !important; border-radius: 12px; }
-    .st-emotion-cache-1cv06cb { background: #161b22; border: 1px dashed #30363d; padding: 20px; border-radius: 10px; }
-    </style>
-    """, unsafe_allow_html=True)
+<style>
+.main {
+    background-color: #ffffff;
+    color: #111111;
+}
+
+.stChatMessage {
+    border: 1px solid #e5e7eb !important;
+    border-radius: 8px;
+    background-color: #f9fafb;
+}
+
+.st-emotion-cache-1cv06cb {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    padding: 16px;
+    border-radius: 8px;
+}
+
+h1, h2, h3 {
+    color: #111827;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
 
 # --- SESSION STATE ---
 if "messages" not in st.session_state:
@@ -32,15 +52,15 @@ def clean_json_output(raw_text):
     return json.loads(clean_text)
 
 def run_self_healing_sql(user_text):
-    """Retries with error feedback to fix cost and syntax issues."""
     messages = [
         {"role": "system", "content": GITHUB_SCHEMA_PROMPT},
         {"role": "user", "content": user_text}
     ]
     
+    raw_response = "" 
+
     for attempt in range(1, 4):
         try:
-            # 1. Generate SQL
             output = ollama.chat(model='llama3', messages=messages, format='json')
             raw_response = output['message']['content']
             parsed = clean_json_output(raw_response)
@@ -58,11 +78,15 @@ def run_self_healing_sql(user_text):
             # 3. SELF-HEALING FEEDBACK LOOP
             messages.append({"role": "assistant", "content": raw_response})
             
+            # THE SMART TRAPS
             if "too expensive" in error_msg.lower():
-                # Specific instructions to reduce scan size
                 feedback = f"CRITICAL ERROR: Your query scans too much data ({error_msg}). Use a more specific WHERE repo_name filter, avoid 'contents' table, and reduce LIMIT."
+            
+            elif "ARRAY<STRING>, STRING" in error_msg:
+                # NEW: Specific trap for the stubborn array error
+                feedback = f"FATAL TYPE ERROR: {error_msg}. You CANNOT use '=' or 'LIKE' on the language array! You MUST use `CROSS JOIN UNNEST(language) AS lang` and then filter using `lang.name = '...'`."
+            
             else:
-                # Syntax or schema error feedback
                 feedback = f"SQL ERROR: {error_msg}. Check your JOINs and UNNEST syntax. Ensure columns like 'id' or 'commit' are used correctly."
             
             messages.append({"role": "user", "content": feedback})
@@ -77,7 +101,7 @@ def generate_natural_response(user_query, bq_results):
 
 # --- MAIN UI ---
 st.title("Voice-to-SQL Agent")
-st.caption("Connected to `bigquery-public-data.github_repos`")
+st.caption("Connected to `bigquery-public-data.github_repos` | Voice Activation Only")
 
 # Sidebar for controls
 with st.sidebar:
@@ -95,24 +119,25 @@ for msg in st.session_state.messages:
                 st.code(msg["sql"], language="sql")
                 st.dataframe(msg["data"])
 
-# Input Section
+# --- VOICE INPUT SECTION ---
 st.divider()
-input_col, mic_col = st.columns([5, 1])
+st.write("### Ask a question using your microphone:")
 
-with mic_col:
-    audio_data = mic_recorder(start_prompt="🎙️", stop_prompt="🛑", key="mic")
+# Removed the columns and text input entirely
+audio_data = mic_recorder(start_prompt="Click to Speak", stop_prompt="Stop Recording", key="mic")
 
-with input_col:
-    user_text = st.chat_input("Ask about a repository...")
+final_query = None
 
-# Logic Trigger
-final_query = user_text
 if audio_data:
-    # Example placeholder for transcription logic
+    # -------------------------------------------------------------------------
+    # NOTE: To make this fully functional, you need to transcribe the audio here.
+    # You would pass audio_data['bytes'] to a Whisper model or API.
+    # Example placeholder for transcription logic:
+    # -------------------------------------------------------------------------
     final_query = "Who are the top contributors to the 'facebook/react' repo?" 
 
 if final_query:
-    with st.spinner("Writing optimized SQL..."):
+    with st.spinner("Analyzing voice and writing optimized SQL..."):
         sql, results, voice_ack = run_self_healing_sql(final_query)
         
         if results is not None:
@@ -120,7 +145,7 @@ if final_query:
             final_answer = generate_natural_response(final_query, results)
             
             # Store in session
-            st.session_state.messages.append({"role": "user", "content": final_query})
+            st.session_state.messages.append({"role": "user", "content": f"*Transcribed:* {final_query}"})
             st.session_state.messages.append({
                 "role": "assistant", 
                 "content": final_answer, 
