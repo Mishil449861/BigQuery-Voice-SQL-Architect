@@ -1,47 +1,66 @@
-# GitHub Voice-to-SQL Agent
+# 🎙️ Voice-to-SQL Agent
 
-An AI-powered, voice-activated database assistant that translates natural language questions into highly optimized Google Standard SQL, executes them against the `bigquery-public-data.github_repos` dataset, and returns conversational answers. 
+An end-to-end, locally hosted voice assistant that transcribes spoken language into database queries, executes them securely on Google BigQuery, and translates the raw data back into natural, conversational answers.
 
-This project features a **Self-Healing SQL Loop** that automatically detects BigQuery syntax errors or high-cost queries (via dry-runs) and instructs the LLM to fix its own code before returning the final result.
+## ✨ Features
 
-## Features
+* **Real-time Voice Transcription:** Uses `faster-whisper` (`tiny.en`) to quickly and accurately capture audio input.
+* **Local AI Processing:** Leverages Ollama running locally (optimized for models like `qwen2.5-coder` and `deepseek-coder`) to map natural language to structured SQL syntax without relying on expensive LLM APIs.
+* **Self-Healing SQL Pipeline:** If BigQuery throws a syntax or execution error, the agent intercepts the error, feeds it back to the LLM, and automatically corrects the query (e.g., automatically applying `UNNEST()` for array columns).
+* **Cost Safety Guardrails:** Implements a dry-run check before execution, automatically rejecting queries that scan more than 150 GB of data to protect BigQuery free-tier limits.
+* **Natural Language Summarization:** Feeds the structured JSON results back through the LLM to generate a clean, human-readable summary.
 
-* **Dual Interfaces**: Includes a polished web UI (Streamlit) and a fast, low-latency Terminal UI with local Text-to-Speech (TTS) and Speech-to-Text (STT).
-* **Self-Healing SQL**: Automatically corrects `UNNEST` array errors, invalid table joins, and type mismatches.
-* **Cost Guardrails**: Uses BigQuery's `dry_run` feature to estimate query costs. Queries scanning over 150 GB are automatically blocked and sent back to the LLM for optimization (e.g., adding strict `WHERE` clauses).
-* **Local LLM**: Powered by `ollama` (Llama 3) for privacy and zero API costs on the LLM side.
+## 🛠️ Tech Stack
 
-## Tech Stack
+* **Frontend:** Streamlit + `streamlit_mic_recorder`
+* **Audio Processing:** `faster-whisper`
+* **LLM Engine:** Ollama
+* **Database:** Google Cloud BigQuery (`google-cloud-bigquery`)
 
-* **Frontend**: Streamlit (`app.py`), Rich Console (`main.py`)
-* **AI / LLM**: Ollama (Llama 3 8B)
-* **Database**: Google Cloud BigQuery
-* **Audio**: `streamlit-mic-recorder` (Web), `RealtimeSTT` & `RealtimeTTS` (Terminal)
-
----
-
-## Setup & Installation
+## 🚀 Setup & Installation
 
 ### 1. Prerequisites
-* **Python 3.9+** installed.
-* **Ollama** installed and running locally. Run `ollama run llama3` in your terminal to pull the required model.
-* A **Google Cloud Project** with the BigQuery API enabled.
-* A **Service Account JSON Key** with `BigQuery User` and `BigQuery Data Viewer` roles.
+* Python 3.10+
+* **Ollama** installed on your machine.
+* A Google Cloud Service Account JSON key with BigQuery access.
 
-### 2. Clone and Install
-```bash
-# Clone the repository
-git clone [https://github.com/yourusername/voice-to-bq-project.git](https://github.com/yourusername/voice-to-bq-project.git)
-cd voice-to-bq-project
+### 2. Environment Setup
+Clone the repository and install the required dependencies:
 
-# Create a virtual environment
-python -m venv venv
+python -m venv .venv
+.\.venv\Scripts\activate  # Windows
+pip install -r requirements.txt
 
-# Activate the virtual environment
-# On Windows:
-venv\Scripts\activate
-# On Mac/Linux:
-source venv/bin/activate
+### 3. Model Preparation
+Pull a highly capable, efficient coding model using Ollama:
 
-# Install dependencies (ensure you have these in your requirements.txt)
-pip install streamlit ollama google-cloud-bigquery streamlit-mic-recorder rich RealtimeSTT RealtimeTTS
+ollama pull qwen2.5-coder:7b
+*or*
+ollama pull deepseek-coder:6.7b
+
+*(Ensure `LLM_MODEL` in `app.py` matches the model you pulled).*
+
+### 4. BigQuery Credentials
+Update `bq_client.py` with the absolute path to your Google Cloud Service Account `.json` key file:
+
+KEY_PATH = r"C:/path/to/your/service-account.json"
+
+
+## 🧠 Managing VRAM & GPU Memory
+
+Running both Whisper and a local LLM simultaneously requires careful VRAM management, especially on GPUs with 8GB or less. 
+
+If you encounter `%!w(<nil>)` runner crashes or out-of-memory errors, you can adjust `app.py` to balance the load:
+* **Offload Whisper to CPU:** Change the `device` parameter in `load_whisper_model()` from `"cuda"` to `"cpu"`.
+* **Cap LLM VRAM Usage:** Adjust `num_ctx` (e.g., 1024) and `num_gpu` in `LLM_OPTIONS` to prevent the model from monopolizing the GPU.
+* **Resolve Windows DLL Issues:** If PyTorch fails to load CUDA for Whisper, you may need to copy `cublas64_12.dll` from your virtual environment's `torch/lib` folder to the root project directory.
+
+## 🏃 Usage
+
+Start the Streamlit interface:
+
+streamlit run app.py
+
+1. Wait for the models to load into memory.
+2. Click the mic button and speak a query (e.g., *"What are the top 5 repos by commit count?"*).
+3. Review the generated SQL, raw data, and conversational summary on the screen!
