@@ -12,19 +12,19 @@ from faster_whisper import WhisperModel
 import bq_client
 from prompts import GITHUB_SCHEMA_PROMPT
 
-st.set_page_config(page_title="GitHub SQL Agent Pro", layout="wide")
+st.set_page_config(page_title="GitHub SQL Agent", layout="wide")
 
 # ---------------------------------------------------------------------------
 # Tunables (single place to edit)
 # ---------------------------------------------------------------------------
 LLM_MODEL = "llama3"                 
 LLM_OPTIONS = {
-    "num_ctx": 1024,   # Lowered from 2048 to save ~500MB of VRAM
-    "temperature": 0.1,
+    "num_ctx": 1024,   
+    "temperature": 0.0, # Keeps output deterministic and strictly logical
     "num_predict": 512,
-    "num_gpu": -1,     # The magic number: -1 strictly forces ALL model layers onto the GPU
+    "num_gpu": -1,     
 }
-WHISPER_MODEL_NAME = "tiny.en"        # was "base" — 5x faster on CPU, 75MB vs 140MB
+WHISPER_MODEL_NAME = "tiny.en"        
 RUNNER_CRASH_HINTS = ("runner process has terminated", "llama runner", "connection refused")
 
 st.markdown("""
@@ -64,7 +64,6 @@ def is_runner_crash(err_msg: str) -> bool:
 # ---------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Loading Whisper model...")
 def load_whisper_model():
-    # Bypasses CUDA entirely, no DLLs required
     return WhisperModel(WHISPER_MODEL_NAME, device="cpu", compute_type="int8")
 
 def transcribe_audio(audio_bytes):
@@ -74,8 +73,6 @@ def transcribe_audio(audio_bytes):
             tmp.write(audio_bytes)
             tmp_path = tmp.name
         try:
-            # vad_filter=False avoids a one-time silero-vad download that can
-            # appear to "hang forever" on first run with no progress indicator
             segments, _ = model.transcribe(tmp_path, beam_size=1, vad_filter=False)
             text = " ".join(seg.text for seg in list(segments)).strip()
         finally:
@@ -96,13 +93,6 @@ def check_ollama():
         return False
 
 def warm_up_model():
-    """
-    Pre-load llama3 into Ollama's memory ONCE at app startup, BEFORE Whisper
-    is loaded. Ollama keeps the model resident for 5 min by default, so it
-    will still be hot when the user submits a query. This is the key fix for
-    the 'runner process terminated' OOM crash — we avoid loading both
-    llama3 and Whisper at the same moment.
-    """
     if st.session_state.model_warm:
         return True
     try:
@@ -117,15 +107,10 @@ def warm_up_model():
         st.error(
             f"Could not load `{LLM_MODEL}`: {e}\n\n"
             f"Try in a terminal: `ollama run {LLM_MODEL} 'hi'`. "
-            f"If that hangs or crashes, check `%LOCALAPPDATA%\\Ollama\\logs\\server.log`."
         )
         return False
 
 def call_llm(messages, want_json=True):
-    """
-    Single LLM call with one auto-retry specifically for runner crashes.
-    Distinguishes crashes (retry as-is) from real errors (raise to caller).
-    """
     last_err = None
     for retry in range(2):
         try:
@@ -137,7 +122,6 @@ def call_llm(messages, want_json=True):
         except Exception as e:
             last_err = e
             if is_runner_crash(str(e)) and retry == 0:
-                # Give Ollama 2s to clean up the dead runner, then try once more
                 time.sleep(2)
                 st.session_state.model_warm = False
                 continue
@@ -145,7 +129,7 @@ def call_llm(messages, want_json=True):
     raise last_err
 
 # ---------------------------------------------------------------------------
-# SQL agent — self-healing only on real SQL errors, not on runner crashes
+# SQL agent
 # ---------------------------------------------------------------------------
 def run_self_healing_sql(user_text):
     messages = [
@@ -158,9 +142,12 @@ def run_self_healing_sql(user_text):
         try:
             raw_response = call_llm(messages, want_json=True)
             parsed = clean_json_output(raw_response)
+            
+            # Extract SQL and the critical "thinking" key
             sql = parsed["sql"]
+            thinking = parsed.get("thinking", "No reasoning provided.")
 
-            # --- Array sanitizers (safety net for the LLM) ---
+            # --- Array sanitizers ---
             if "repo_name" in sql:
                 m = re.search(r"repo_name\s*(?:=|LIKE)\s*'([^']+)'", sql)
                 if m:
@@ -184,18 +171,17 @@ def run_self_healing_sql(user_text):
                 )
 
             results = bq_client.execute_bq_query(sql)
-            return sql, results, parsed.get("reply", "")
+            
+            # Return thinking alongside the results
+            return sql, results, parsed.get("reply", ""), thinking
 
         except Exception as e:
             error_msg = str(e)
             st.warning(f"Attempt {attempt} failed: {error_msg}")
 
-            # If the model itself crashed, there is no assistant turn worth
-            # feeding back. Just retry the same prompt cleanly.
             if is_runner_crash(error_msg) or not raw_response:
                 continue
 
-            # Real SQL/parse error — feed it back for self-healing
             messages.append({"role": "assistant", "content": raw_response})
             if "too expensive" in error_msg.lower():
                 feedback = "Reduce data scanned. Add LIMIT and more specific filters."
@@ -205,28 +191,30 @@ def run_self_healing_sql(user_text):
                 feedback = f"SQL error: {error_msg}. Fix the query and try again."
             messages.append({"role": "user", "content": feedback})
 
-    return None, None, "Failed after retries."
+    return None, None, "Failed after retries.", "Failed."
 
 def generate_natural_response(user_query, bq_results):
     if not bq_results:
-        return "No matching data found."
+        return "No matching data found in the database."
     
-    # 1. Slice only the top 5 results so we don't overwhelm the LLM's context window
     top_results = bq_results[:5]
-    
-    # 2. Convert the messy JSON into a clean, readable string
     clean_data = "\n".join([str(row) for row in top_results])
     
-    # 3. Add a strict constraint to the prompt
-    prompt = (
+    # Fortify the LLM with a strict system prompt to prevent conversational hallucination
+    system_prompt = "You are a strict data reporter. Do not invent data, do not hallucinate, and do not make assumptions. Report ONLY what is in the Database Results."
+    
+    user_prompt = (
         f"User question: {user_query}\n"
         f"Database Results:\n{clean_data}\n\n"
-        f"Answer the user's question briefly and naturally. "
-        f"CRITICAL: You must ONLY use the numbers and names provided in the Database Results above. Do not invent or guess any information."
+        f"Answer briefly. If the answer is not in the data, state that."
     )
     
     try:
-        return call_llm([{"role": "user", "content": prompt}], want_json=False).strip()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        return call_llm(messages, want_json=False).strip()
     except Exception as e:
         return f"(Could not summarise — {e})"
 
@@ -234,22 +222,18 @@ def generate_natural_response(user_query, bq_results):
 # UI
 # ---------------------------------------------------------------------------
 st.title("Voice-to-SQL Agent")
-st.caption("Whisper-powered + BigQuery + Self-healing SQL")
 
 with st.sidebar:
     if st.button("Clear Chat"):
         st.session_state.messages = []
         st.session_state.last_audio_id = None
         st.rerun()
-    st.caption(f"LLM: `{LLM_MODEL}`")
-    st.caption(f"Whisper: `{WHISPER_MODEL_NAME}`")
     st.caption("✅ Model warmed" if st.session_state.model_warm else "⚪ Model cold")
 
 if not check_ollama():
     st.error("⚠️ Ollama is not running. Start it with `ollama serve`, then refresh.")
     st.stop()
 
-# Pre-warm BEFORE Whisper to keep peak memory low
 if not st.session_state.model_warm:
     with st.spinner(f"Warming up {LLM_MODEL} (one-time, ~10–30s)..."):
         if not warm_up_model():
@@ -260,19 +244,26 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.write(msg["content"])
         if "sql" in msg:
-            with st.expander("SQL + Data"):
+            with st.expander("Agent Reasoning & SQL Data"):
+                st.markdown(f"**Agent Thinking:**\n> {msg.get('thinking', 'N/A')}")
                 st.code(msg["sql"], language="sql")
                 st.dataframe(msg["data"])
 
 def _process_query(text):
     with st.spinner("Generating SQL and querying BigQuery..."):
-        sql, results, _ = run_self_healing_sql(text)
+        # Unpack the 4th returned value (thinking)
+        sql, results, _, thinking = run_self_healing_sql(text)
+        
     if results is not None:
         with st.spinner("Summarising results..."):
             answer = generate_natural_response(text, results)
         st.session_state.messages.append({"role": "user", "content": text})
         st.session_state.messages.append({
-            "role": "assistant", "content": answer, "sql": sql, "data": results,
+            "role": "assistant", 
+            "content": answer, 
+            "sql": sql, 
+            "data": results,
+            "thinking": thinking # Store thinking in session state
         })
         st.rerun()
     else:
