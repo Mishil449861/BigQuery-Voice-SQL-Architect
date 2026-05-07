@@ -20,7 +20,7 @@ st.set_page_config(page_title="GitHub SQL Agent", layout="wide")
 LLM_MODEL = "llama3"                 
 LLM_OPTIONS = {
     "num_ctx": 1024,   
-    "temperature": 0.0, # Keeps output deterministic and strictly logical
+    "temperature": 0.1, # Keeps output deterministic and strictly logical
     "num_predict": 512,
     "num_gpu": -1,     
 }
@@ -143,36 +143,12 @@ def run_self_healing_sql(user_text):
             raw_response = call_llm(messages, want_json=True)
             parsed = clean_json_output(raw_response)
             
-            # Extract SQL and the critical "thinking" key
             sql = parsed["sql"]
             thinking = parsed.get("thinking", "No reasoning provided.")
 
-            # --- Array sanitizers ---
-            if "repo_name" in sql:
-                m = re.search(r"repo_name\s*(?:=|LIKE)\s*'([^']+)'", sql)
-                if m:
-                    term = m.group(1).replace('%', '')
-                    sql = re.sub(
-                        r"repo_name\s*(?:=|LIKE)\s*'[^']+'",
-                        f"EXISTS(SELECT 1 FROM UNNEST(repo_name) AS r_name WHERE r_name LIKE '%{term}%')",
-                        sql,
-                    )
-            if "language LIKE" in sql:
-                sql = re.sub(
-                    r"language\s*LIKE\s*('[^']+')",
-                    r"EXISTS(SELECT 1 FROM UNNEST(language) AS lang WHERE lang.name LIKE \1)",
-                    sql,
-                )
-            if "language =" in sql:
-                sql = re.sub(
-                    r"language\s*=\s*('[^']+')",
-                    r"EXISTS(SELECT 1 FROM UNNEST(language) AS lang WHERE lang.name = \1)",
-                    sql,
-                )
-
+            # Executing query directly without hardcoded array sanitizers
             results = bq_client.execute_bq_query(sql)
             
-            # Return thinking alongside the results
             return sql, results, parsed.get("reply", ""), thinking
 
         except Exception as e:
@@ -182,14 +158,12 @@ def run_self_healing_sql(user_text):
             if is_runner_crash(error_msg) or not raw_response:
                 continue
 
+            # Feed the exact BigQuery error back for dynamic self-healing
             messages.append({"role": "assistant", "content": raw_response})
-            if "too expensive" in error_msg.lower():
-                feedback = "Reduce data scanned. Add LIMIT and more specific filters."
-            elif "ARRAY" in error_msg or "UNNEST" in error_msg:
-                feedback = "Use UNNEST() for array columns like repo_name and language."
-            else:
-                feedback = f"SQL error: {error_msg}. Fix the query and try again."
-            messages.append({"role": "user", "content": feedback})
+            messages.append({
+                "role": "user", 
+                "content": f"SQL Error: {error_msg}. Please fix the syntax, paying close attention to ARRAY vs STRING columns and proper UNNEST usage."
+            })
 
     return None, None, "Failed after retries.", "Failed."
 
@@ -200,7 +174,6 @@ def generate_natural_response(user_query, bq_results):
     top_results = bq_results[:5]
     clean_data = "\n".join([str(row) for row in top_results])
     
-    # Fortify the LLM with a strict system prompt to prevent conversational hallucination
     system_prompt = "You are a strict data reporter. Do not invent data, do not hallucinate, and do not make assumptions. Report ONLY what is in the Database Results."
     
     user_prompt = (
@@ -219,39 +192,10 @@ def generate_natural_response(user_query, bq_results):
         return f"(Could not summarise — {e})"
 
 # ---------------------------------------------------------------------------
-# UI
+# UI Helpers & Processing
 # ---------------------------------------------------------------------------
-st.title("Voice-to-SQL Agent")
-
-with st.sidebar:
-    if st.button("Clear Chat"):
-        st.session_state.messages = []
-        st.session_state.last_audio_id = None
-        st.rerun()
-    st.caption("✅ Model warmed" if st.session_state.model_warm else "⚪ Model cold")
-
-if not check_ollama():
-    st.error("⚠️ Ollama is not running. Start it with `ollama serve`, then refresh.")
-    st.stop()
-
-if not st.session_state.model_warm:
-    with st.spinner(f"Warming up {LLM_MODEL} (one-time, ~10–30s)..."):
-        if not warm_up_model():
-            st.stop()
-
-# Chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-        if "sql" in msg:
-            with st.expander("Agent Reasoning & SQL Data"):
-                st.markdown(f"**Agent Thinking:**\n> {msg.get('thinking', 'N/A')}")
-                st.code(msg["sql"], language="sql")
-                st.dataframe(msg["data"])
-
 def _process_query(text):
     with st.spinner("Generating SQL and querying BigQuery..."):
-        # Unpack the 4th returned value (thinking)
         sql, results, _, thinking = run_self_healing_sql(text)
         
     if results is not None:
@@ -263,28 +207,60 @@ def _process_query(text):
             "content": answer, 
             "sql": sql, 
             "data": results,
-            "thinking": thinking # Store thinking in session state
+            "thinking": thinking 
         })
         st.rerun()
     else:
         st.error("Query failed after 3 attempts. Try rephrasing your question.")
 
-# Text input
+# ---------------------------------------------------------------------------
+# App Layout & Main Execution
+# ---------------------------------------------------------------------------
+st.title("Voice-to-SQL Agent")
+
+# Sidebar for controls and mic
+with st.sidebar:
+    if st.button("Clear Chat"):
+        st.session_state.messages = []
+        st.session_state.last_audio_id = None
+        st.rerun()
+    st.caption("✅ Model warmed" if st.session_state.model_warm else "⚪ Model cold")
+    
+    st.divider()
+    st.subheader("🎙️ Speak your query")
+    audio_data = mic_recorder(start_prompt="Start Recording", stop_prompt="Stop", key="mic")
+    
+    if audio_data and audio_data.get("id") != st.session_state.last_audio_id:
+        st.session_state.last_audio_id = audio_data["id"]
+        with st.spinner("Transcribing..."):
+            text = transcribe_audio(audio_data["bytes"])
+        if text:
+            st.success(f"You said: **{text}**")
+            _process_query(text)
+        else:
+            st.warning("No speech detected. Please try again.")
+
+# Check systems
+if not check_ollama():
+    st.error("⚠️ Ollama is not running. Start it with `ollama serve`, then refresh.")
+    st.stop()
+
+if not st.session_state.model_warm:
+    with st.spinner(f"Warming up {LLM_MODEL} (one-time, ~10–30s)..."):
+        if not warm_up_model():
+            st.stop()
+
+# Render chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+        if "sql" in msg:
+            with st.expander("Agent Reasoning & SQL Data"):
+                st.markdown(f"**Agent Thinking:**\n> {msg.get('thinking', 'N/A')}")
+                st.code(msg["sql"], language="sql")
+                st.dataframe(msg["data"])
+
+# Text input remains at the absolute bottom
 text_query = st.chat_input("Or type your query here...")
 if text_query:
     _process_query(text_query)
-
-# Mic input
-st.divider()
-st.subheader("Speak your query")
-
-audio_data = mic_recorder(start_prompt="🎙️ Speak", stop_prompt="⏹️ Stop", key="mic")
-if audio_data and audio_data.get("id") != st.session_state.last_audio_id:
-    st.session_state.last_audio_id = audio_data["id"]
-    with st.spinner("Transcribing..."):
-        text = transcribe_audio(audio_data["bytes"])
-    if text:
-        st.success(f"You said: **{text}**")
-        _process_query(text)
-    else:
-        st.warning("No speech detected. Please try again.")
